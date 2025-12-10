@@ -4,9 +4,9 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>iOS 陀螺仪左右晃动 → OSC</title>
+  <title>iOS left and right → OSC</title>
   <style>
-    body { font-family: system-ui, -apple-system, "PingFang SC", "Microsoft Yahei", Arial; margin: 24px; }
+    body { font-family: system-ui, -apple-system, "PingFang SC", Arial; margin: 24px; }
     button { font-size: 16px; padding: 10px 16px; }
     .status { margin-top: 12px; line-height: 1.6; }
     .bubble { display:inline-block; min-width: 28px; text-align:center; padding:6px 10px; border-radius:18px; background:#eee; }
@@ -18,29 +18,29 @@
   </style>
 </head>
 <body>
-  <h1>iOS LEFT AND RIGHT → OSC</h1>
+  <h1>iOS left and right → OSC</h1>
 
   <div class="field">
-    <label>WebSocket address (PC 的 IP) like ws://192.168.0.103:9000</label>
-    <input id="wsUrl" value="ws://192.168.0.103:9000"/>
+    <label>WebSocket 地址（PC 的 IP）例如：ws://192.168.0.103:9000</label>
+    <input id="wsUrl" value="ws://192.168.1.50:8080"/>
   </div>
   <div class="field">
-    <label>OSC address (path) </label>
-    <input id="oscPath" value="/ELVR/param/shake"/>
+    <label>OSC 地址（path）</label>
+    <input id="oscPath" value="/gyro/shake"/>
   </div>
   <div class="field">
-    <label>threshold(acceleration m/s²) </label>
+    <label>晃动阈值（加速度 m/s²）</label>
     <input id="threshold" type="number" value="6"/>
   </div>
   <div class="field">
-    <label>cooldown (ms) </label>
+    <label>冷却时间（ms）</label>
     <input id="cooldown" type="number" value="300"/>
   </div>
 
-  <button id="startBtn">👉 START</button>
+  <button id="startBtn">👉 开始（申请权限并连接）</button>
 
   <div class="status" id="status"></div>
-  <div class="status">OUTPUT：<span class="bubble" id="lastOut">—</span></div>
+  <div class="status">最近输出：<span class="bubble" id="lastOut">—</span></div>
 
   <script>
     const statusEl = document.getElementById('status');
@@ -49,36 +49,34 @@
 
     let ws = null;
     let lastSentTs = 0;
+    let retries = 0;
 
     function log(msg) {
       statusEl.innerHTML = msg;
       console.log(msg);
     }
-
     function setLastOut(val) {
       lastOutEl.textContent = String(val);
       lastOutEl.className = 'bubble ' + (val === 0 ? 'left' : (val === 1 ? 'right' : ''));
     }
 
-    function sendOSC(value) {
+    // ✅ 发送“纯字符串”的工具：`/path arg1 arg2 ...`
+    function sendStringOSC(address, ...args) {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const address = document.getElementById('oscPath').value || '/ELVR/param/shake';
-      const payload = { address, args: [ value ] };
-      ws.send(JSON.stringify(payload));
+      const parts = [address, ...args.map(String)].join(' ');
+      ws.send(parts); // 直接发送纯字符串
+      console.log('📤 WS 字符串已发：', parts);
     }
 
     async function requestSensorsPermission() {
-      // iOS 13+ 需要在用户手势之后申请权限
       try {
         if (typeof DeviceMotionEvent !== 'undefined' &&
             typeof DeviceMotionEvent.requestPermission === 'function') {
           const r = await DeviceMotionEvent.requestPermission();
           if (r !== 'granted') throw new Error('DeviceMotion 权限未授予：' + r);
         }
-        // 一并尝试 DeviceOrientation（部分机型更稳定）
         if (typeof DeviceOrientationEvent !== 'undefined' &&
             typeof DeviceOrientationEvent.requestPermission === 'function') {
-          // 不是必须，但申请一下以便备用
           await DeviceOrientationEvent.requestPermission().catch(()=>{});
         }
         return true;
@@ -89,93 +87,80 @@
     }
 
     function connectWS() {
-      let ws = null;
-      let retries = 0;
+      const url = document.getElementById('wsUrl').value.trim();
+      ws = new WebSocket(url);
 
-      function connectWS() {
-        const url = document.getElementById('wsUrl').value.trim();
-        ws = new WebSocket(url);
+      ws.onopen = () => {
+        retries = 0;
+        log('✅ WebSocket 已连接：' + url);
+        // ✅ 连接验证：发送纯字符串 "/Connect 1"
+        sendStringOSC('/Connect', 1);
+      };
 
-        ws.onopen = () => {
-          retries = 0;
-          log('✅ WebSocket 已连接：' + url);
-        };
+      ws.onerror = (e) => {
+        log(`❌ WebSocket 错误（readyState=${ws.readyState}）`);
+        console.error('WebSocket error:', e);
+      };
 
-        ws.onerror = (e) => {
-          log(`❌ WebSocket error (readyState=${ws.readyState})`);
-          console.error('WebSocket error:', e);
-        };
+      ws.onclose = (evt) => {
+        log(`⚠️ WebSocket 关闭 code=${evt.code} reason=${evt.reason || '(无)'}，将尝试重连…`);
+        if (retries < 5) {
+          const delay = Math.min(1000 * (2 ** retries), 10000);
+          retries++;
+          setTimeout(connectWS, delay);
+        } else {
+          log('❌ stop reconnecting after some attempts.');
+        }
+      };
 
-        ws.onclose = (evt) => {
-          log(`⚠️ WebSocket close code=${evt.code} reason=${evt.reason || '(None)'}, retrying...`);
-          console.warn('WebSocket close:', evt);
-          if (retries < 5) {
-            const delay = Math.min(1000 * (2 ** retries), 10000);
-            retries++;
-            setTimeout(connectWS, delay);
-          } else {
-            log('❌ retries exceeded, giving up.');
-          }
-        };
-
-        ws.onmessage = (e) => {
-          console.log('WS message:', e.data);
-        };
-      }
-
-        // 如果你容易输错 IP，可以给一个默认值：
-        window.addEventListener('DOMContentLoaded', () => {
-          const defaultWs = `ws://${location.hostname || '192.168.0.103'}:9000`;
-          const input = document.getElementById('wsUrl');
-          if (!input.value) input.value = defaultWs;
-        });
-
+      ws.onmessage = (e) => {
+        console.log('WS message:', e.data);
+      };
     }
 
     function startMotionListener() {
       const threshold = Number(document.getElementById('threshold').value || 6);
       const cooldown = Number(document.getElementById('cooldown').value || 300);
 
-      // 使用加速度（含重力）X 轴的阈值来检测左右晃动
       window.addEventListener('devicemotion', (e) => {
         const now = Date.now();
         if (now - lastSentTs < cooldown) return;
 
-        // iOS 上 acceleration 常为 null，使用 accelerationIncludingGravity 更通用
         const ax = (e.accelerationIncludingGravity && e.accelerationIncludingGravity.x)
                    ?? (e.acceleration && e.acceleration.x)
                    ?? 0;
+        const address = document.getElementById('oscPath').value || '/gyro/shake';
 
         if (ax > threshold) {
-          // 向右晃动 → 输出 1
           setLastOut(1);
-          sendOSC(1);
+          sendStringOSC(address, 1); // ➡️ 右 → “/gyro/shake 1”
           lastSentTs = now;
           log(`➡️ shake right（ax=${ax.toFixed(2)}）→ send 1`);
         } else if (ax < -threshold) {
-          // 向左晃动 → 输出 0
           setLastOut(0);
-          sendOSC(0);
+          sendStringOSC(address, 0); // ⬅️ 左 → “/gyro/shake 0”
           lastSentTs = now;
           log(`⬅️ shake left（ax=${ax.toFixed(2)}）→ send 0`);
         }
       }, { passive: true });
 
-      // 备用：使用 DeviceOrientation 的 gamma（左右倾斜角度）作为补充判定
+      // 备用：用 gamma（左右倾斜角）作为补充
       window.addEventListener('deviceorientation', (evt) => {
         const now = Date.now();
         if (now - lastSentTs < cooldown) return;
-        const gamma = evt.gamma; // -90 ~ 90，负为左，正为右
+        const gamma = evt.gamma;
         if (gamma == null) return;
-        const angThreshold = 25; // 度数阈值，可调
+        const angThreshold = 25;
+        const address = document.getElementById('oscPath').value || '/gyro/shake';
+
         if (gamma > angThreshold) {
           setLastOut(1);
-          sendOSC(1);
+          sendStringOSC(address, 1);
           lastSentTs = now;
           log(`➡️ right(γ=${gamma.toFixed(1)}°) → send 1`);
         } else if (gamma < -angThreshold) {
           setLastOut(0);
-          sendOSC(0);
+          sendStringOSC(address, 0);
           lastSentTs = now;
           log(`⬅️ left (γ=${gamma.toFixed(1)}°) → send 0`);
         }

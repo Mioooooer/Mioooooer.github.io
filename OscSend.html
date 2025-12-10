@@ -18,29 +18,29 @@
   </style>
 </head>
 <body>
-  <h1>iOS 陀螺仪左右晃动 → OSC</h1>
+  <h1>iOS LEFT AND RIGHT → OSC</h1>
 
   <div class="field">
-    <label>WebSocket 地址（PC 的 IP）例如：ws://192.168.1.50:9000</label>
-    <input id="wsUrl" value="ws://192.168.1.50:9000"/>
+    <label>WebSocket address (PC 的 IP) like ws://192.168.0.103:9000</label>
+    <input id="wsUrl" value="ws://192.168.0.103:9000"/>
   </div>
   <div class="field">
-    <label>OSC 地址（path）</label>
+    <label>OSC address (path) </label>
     <input id="oscPath" value="/ELVR/param/shake"/>
   </div>
   <div class="field">
-    <label>晃动阈值（加速度 m/s²，绝对值超过判定左右）</label>
+    <label>threshold(acceleration m/s²) </label>
     <input id="threshold" type="number" value="6"/>
   </div>
   <div class="field">
-    <label>冷却时间（ms，避免抖动连发）</label>
+    <label>cooldown (ms) </label>
     <input id="cooldown" type="number" value="300"/>
   </div>
 
-  <button id="startBtn">👉 开始（申请权限并连接）</button>
+  <button id="startBtn">👉 START</button>
 
   <div class="status" id="status"></div>
-  <div class="status">最近输出：<span class="bubble" id="lastOut">—</span></div>
+  <div class="status">OUTPUT：<span class="bubble" id="lastOut">—</span></div>
 
   <script>
     const statusEl = document.getElementById('status');
@@ -89,15 +89,47 @@
     }
 
     function connectWS() {
-      const url = document.getElementById('wsUrl').value;
-      ws = new WebSocket(url);
-      ws.onopen = () => log('✅ WebSocket 已连接：' + url);
-      ws.onclose = () => log('⚠️ WebSocket 已断开');
-      ws.onerror = (e) => log('❌ WebSocket 错误');
-      ws.onmessage = (e) => {
-        // 可选：服务器回显或状态
-        console.log('WS message:', e.data);
-      };
+      let ws = null;
+      let retries = 0;
+
+      function connectWS() {
+        const url = document.getElementById('wsUrl').value.trim();
+        ws = new WebSocket(url);
+
+        ws.onopen = () => {
+          retries = 0;
+          log('✅ WebSocket 已连接：' + url);
+        };
+
+        ws.onerror = (e) => {
+          log(`❌ WebSocket error (readyState=${ws.readyState})`);
+          console.error('WebSocket error:', e);
+        };
+
+        ws.onclose = (evt) => {
+          log(`⚠️ WebSocket close code=${evt.code} reason=${evt.reason || '(None)'}, retrying...`);
+          console.warn('WebSocket close:', evt);
+          if (retries < 5) {
+            const delay = Math.min(1000 * (2 ** retries), 10000);
+            retries++;
+            setTimeout(connectWS, delay);
+          } else {
+            log('❌ retries exceeded, giving up.');
+          }
+        };
+
+        ws.onmessage = (e) => {
+          console.log('WS message:', e.data);
+        };
+      }
+
+        // 如果你容易输错 IP，可以给一个默认值：
+        window.addEventListener('DOMContentLoaded', () => {
+          const defaultWs = `ws://${location.hostname || '192.168.0.103'}:9000`;
+          const input = document.getElementById('wsUrl');
+          if (!input.value) input.value = defaultWs;
+        });
+
     }
 
     function startMotionListener() {
@@ -119,13 +151,13 @@
           setLastOut(1);
           sendOSC(1);
           lastSentTs = now;
-          log(`➡️ 向右晃动（ax=${ax.toFixed(2)}）→ 发送 1`);
+          log(`➡️ shake right（ax=${ax.toFixed(2)}）→ send 1`);
         } else if (ax < -threshold) {
           // 向左晃动 → 输出 0
           setLastOut(0);
           sendOSC(0);
           lastSentTs = now;
-          log(`⬅️ 向左晃动（ax=${ax.toFixed(2)}）→ 发送 0`);
+          log(`⬅️ shake left（ax=${ax.toFixed(2)}）→ send 0`);
         }
       }, { passive: true });
 
@@ -140,23 +172,23 @@
           setLastOut(1);
           sendOSC(1);
           lastSentTs = now;
-          log(`➡️ 右倾（γ=${gamma.toFixed(1)}°）→ 发送 1`);
+          log(`➡️ right(γ=${gamma.toFixed(1)}°) → send 1`);
         } else if (gamma < -angThreshold) {
           setLastOut(0);
           sendOSC(0);
           lastSentTs = now;
-          log(`⬅️ 左倾（γ=${gamma.toFixed(1)}°）→ 发送 0`);
+          log(`⬅️ left (γ=${gamma.toFixed(1)}°) → send 0`);
         }
       }, { passive: true });
     }
 
     startBtn.addEventListener('click', async () => {
-      log('⏳ 正在申请传感器权限并连接 WebSocket...');
+      log('⏳ Applying for sensor permission and connecting WebSocket...');
       const ok = await requestSensorsPermission();
       if (!ok) return;
       connectWS();
       startMotionListener();
-      log('✅ 就绪：晃动手机左右将输出 0/1，并通过 OSC 发送');
+      log('✅ Ready: Shake phone left/right to output 0/1 and send via OSC');
     });
   </script>
 </body>
